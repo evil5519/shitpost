@@ -1,7 +1,7 @@
 [package]
-name = "eframe_template"
+name = "shitpost"
 version = "0.1.0"
-authors = ["Emil Ernerfeldt <emil.ernerfeldt@gmail.com>"]
+authors = ["evil5519 <>"]
 edition = "2024"
 license = "MIT OR Apache-2.0"
 include = ["LICENSE-APACHE", "LICENSE-MIT", "**/*.rs", "Cargo.toml"]
@@ -18,6 +18,16 @@ log = "0.4.27"
 
 # You only need serde if you want app persistence:
 serde = { version = "1.0.219", features = ["derive"] }
+
+[features]
+# Enables eframe's `inspection` plugin so the egui MCP (`egui-mcp`, from
+# rerun-io/kittest_inspector) can attach to a running native app.
+# Development/debugging only: `cargo run --features inspection`.
+# Runtime behavior (see crates/egui_inspection): unset or falsy (0/false) =
+# completely off; truthy (1/true) binds 127.0.0.1:5719; any other value is a
+# host:port bind address (e.g. 0.0.0.0:5719). Release builds omit it by
+# default.
+inspection = ["eframe/inspection"]
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
