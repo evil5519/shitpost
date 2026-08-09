@@ -34,6 +34,94 @@ enum View {
     ColorConverter,
 }
 
+/// Teal accent for dark theme (#2DD4BF).
+const ACCENT_DARK: egui::Color32 = egui::Color32::from_rgb(45, 212, 191);
+/// Teal accent for light theme (#0D9488).
+const ACCENT_LIGHT: egui::Color32 = egui::Color32::from_rgb(13, 148, 136);
+
+/// A Home launcher destination with its card copy.
+struct Destination {
+    view: View,
+    title: &'static str,
+    description: &'static str,
+}
+
+const PORTFOLIO_DESTINATIONS: [Destination; 3] = [
+    Destination {
+        view: View::About,
+        title: "About",
+        description: "Who I am and what I do.",
+    },
+    Destination {
+        view: View::Projects,
+        title: "Projects",
+        description: "Selected work and experiments.",
+    },
+    Destination {
+        view: View::Contact,
+        title: "Contact",
+        description: "Email, website, and social links.",
+    },
+];
+
+const TOOL_DESTINATIONS: [Destination; 3] = [
+    Destination {
+        view: View::Calculator,
+        title: "Calculator",
+        description: "Add, subtract, multiply, and divide.",
+    },
+    Destination {
+        view: View::TextAnalyzer,
+        title: "Text analyzer",
+        description: "Live character, word, and line counts.",
+    },
+    Destination {
+        view: View::ColorConverter,
+        title: "Color converter",
+        description: "Hex and RGB with a live preview.",
+    },
+];
+
+/// The accent color for the current (resolved) theme.
+fn accent_color(ui: &egui::Ui) -> egui::Color32 {
+    if ui.style().visuals.dark_mode {
+        ACCENT_DARK
+    } else {
+        ACCENT_LIGHT
+    }
+}
+
+/// Apply the app-wide visual style to both dark and light themes: a teal
+/// accent, rounded corners, and a consistent spacing scale. Runs each frame so
+/// the System/Dark/Light theme buttons keep working.
+fn apply_style(ctx: &egui::Context) {
+    ctx.all_styles_mut(|style| {
+        let accent = if style.visuals.dark_mode {
+            ACCENT_DARK
+        } else {
+            ACCENT_LIGHT
+        };
+
+        style.visuals.hyperlink_color = accent;
+        style.visuals.selection.bg_fill = accent.gamma_multiply(0.25);
+        style.visuals.selection.stroke = egui::Stroke::new(1.0, accent);
+        style.visuals.window_corner_radius = 10.0.into();
+        style.visuals.menu_corner_radius = 8.0.into();
+        for widget in [
+            &mut style.visuals.widgets.noninteractive,
+            &mut style.visuals.widgets.inactive,
+            &mut style.visuals.widgets.hovered,
+            &mut style.visuals.widgets.active,
+            &mut style.visuals.widgets.open,
+        ] {
+            widget.corner_radius = 6.0.into();
+        }
+
+        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+        style.spacing.button_padding = egui::vec2(10.0, 6.0);
+    });
+}
+
 /// Authorable portfolio content. All fields default to empty; visitor views
 /// show neutral messages until content is authored in the editor.
 #[derive(serde::Deserialize, serde::Serialize, Default)]
@@ -281,6 +369,7 @@ impl eframe::App for PortfolioApp {
 
     /// Called each time the UI needs repainting, which may be many times per second.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        apply_style(ui.ctx());
         if Self::is_mobile(ui.ctx()) {
             self.show_mobile(ui);
             return;
@@ -332,7 +421,10 @@ impl eframe::App for PortfolioApp {
             });
         });
 
-        egui::CentralPanel::default().show(ui, |ui| {
+        let frame = egui::Frame::new()
+            .fill(ui.visuals().panel_fill)
+            .inner_margin(egui::Margin::same(28));
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             self.show_desktop(ui);
         });
     }
@@ -462,7 +554,10 @@ impl PortfolioApp {
             });
         });
 
-        egui::CentralPanel::default().show(ui, |ui| {
+        let frame = egui::Frame::new()
+            .fill(ui.visuals().panel_fill)
+            .inner_margin(egui::Margin::same(16));
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let launch = match self.workspace.mobile_view {
                     View::Home => show_home(ui, &self.portfolio),
@@ -536,51 +631,112 @@ fn window(
     builder.show(ctx, add_contents);
 }
 
-/// The Home launcher: name, headline, and launch buttons for every
-/// destination. Returns the clicked destination, if any.
+/// The Home launcher: hero name/headline, then card grids for portfolio views
+/// and tools. Returns the clicked destination, if any.
 fn show_home(ui: &mut egui::Ui, content: &PortfolioContent) -> Option<View> {
+    let accent = accent_color(ui);
+
     let name = if content.display_name.is_empty() {
         "Personal Portfolio"
     } else {
         &content.display_name
     };
-    ui.heading(name);
+    ui.label(egui::RichText::new(name).size(32.0).strong());
+    ui.add_space(6.0);
 
     let headline = if content.headline.is_empty() {
         "Client-side Rust portfolio and interactive tools."
     } else {
         &content.headline
     };
-    ui.label(headline);
+    ui.label(
+        egui::RichText::new(headline)
+            .size(15.0)
+            .color(ui.visuals().weak_text_color()),
+    );
 
-    ui.add_space(12.0);
-    ui.separator();
-    ui.add_space(12.0);
-
+    ui.add_space(24.0);
+    section_label(ui, "Portfolio", accent);
+    ui.add_space(10.0);
     let mut clicked = None;
-    ui.horizontal(|ui| {
-        if ui.button("About").clicked() {
-            clicked = Some(View::About);
-        }
-        if ui.button("Projects").clicked() {
-            clicked = Some(View::Projects);
-        }
-        if ui.button("Contact").clicked() {
-            clicked = Some(View::Contact);
-        }
+    destination_grid(ui, "portfolio_cards", &PORTFOLIO_DESTINATIONS, &mut clicked);
+
+    ui.add_space(28.0);
+    section_label(ui, "Tools", accent);
+    ui.add_space(10.0);
+    destination_grid(ui, "tools_cards", &TOOL_DESTINATIONS, &mut clicked);
+
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+        ui.label(
+            egui::RichText::new("Built with Rust · egui · eframe")
+                .size(12.0)
+                .weak(),
+        );
     });
-    ui.horizontal(|ui| {
-        if ui.button("Calculator").clicked() {
-            clicked = Some(View::Calculator);
-        }
-        if ui.button("Text analyzer").clicked() {
-            clicked = Some(View::TextAnalyzer);
-        }
-        if ui.button("Color converter").clicked() {
-            clicked = Some(View::ColorConverter);
-        }
-    });
+
     clicked
+}
+
+/// A small, uppercase-styled section heading.
+fn section_label(ui: &mut egui::Ui, text: &str, accent: egui::Color32) {
+    ui.label(egui::RichText::new(text).size(12.0).strong().color(accent));
+}
+
+/// Lay the given destinations out as an equal-width card grid (3 columns on
+/// desktop, 2 on mobile).
+fn destination_grid(
+    ui: &mut egui::Ui,
+    grid_id: &'static str,
+    destinations: &[Destination],
+    clicked: &mut Option<View>,
+) {
+    let columns = if ui.available_width() >= 700.0 { 3 } else { 2 };
+    let gap = ui.spacing().item_spacing.x;
+    let card_w =
+        ((ui.available_width() - (columns as f32 - 1.0) * gap) / columns as f32).max(150.0);
+    let card_h = 76.0;
+
+    egui::Grid::new(grid_id)
+        .num_columns(columns)
+        .spacing(egui::vec2(gap, gap))
+        .show(ui, |ui| {
+            for destination in destinations {
+                if destination_card(ui, destination, egui::vec2(card_w, card_h)) {
+                    *clicked = Some(destination.view);
+                }
+            }
+        });
+}
+
+/// A clickable card: a large rounded button with a bold title and a wrapped
+/// description.
+fn destination_card(ui: &mut egui::Ui, destination: &Destination, size: egui::Vec2) -> bool {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        destination.title,
+        0.0,
+        egui::text::TextFormat {
+            font_id: egui::FontId::proportional(15.0),
+            color: ui.visuals().strong_text_color(),
+            ..Default::default()
+        },
+    );
+    job.append("\n", 0.0, egui::text::TextFormat::default());
+    job.append(
+        destination.description,
+        0.0,
+        egui::text::TextFormat {
+            font_id: egui::FontId::proportional(12.5),
+            color: ui.visuals().text_color(),
+            ..Default::default()
+        },
+    );
+
+    let button = egui::Button::new(job)
+        .min_size(size)
+        .corner_radius(8.0)
+        .wrap_mode(egui::TextWrapMode::Wrap);
+    ui.add(button).clicked()
 }
 
 fn show_about(ui: &mut egui::Ui, content: &PortfolioContent) {
