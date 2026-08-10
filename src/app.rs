@@ -68,7 +68,7 @@ const TOOL_DESTINATIONS: [Destination; 3] = [
     Destination {
         view: View::Calculator,
         title: "Calculator",
-        description: "Add, subtract, multiply, and divide.",
+        description: "Scientific REPL with units and exact results.",
     },
     Destination {
         view: View::TextAnalyzer,
@@ -155,7 +155,6 @@ struct WorkspaceState {
     calculator_open: bool,
     text_analyzer_open: bool,
     color_converter_open: bool,
-    calculator_error: Option<&'static str>,
     color_error: Option<&'static str>,
 }
 
@@ -170,7 +169,6 @@ impl Default for WorkspaceState {
             calculator_open: false,
             text_analyzer_open: false,
             color_converter_open: false,
-            calculator_error: None,
             color_error: None,
         }
     }
@@ -195,77 +193,205 @@ impl WorkspaceState {
     }
 }
 
-/// Calculator input state. Persisted so the last session's operands,
-/// operation, and result survive a reload.
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(default)]
+#[derive(serde::Serialize)]
 struct CalculatorState {
-    left: String,
-    right: String,
-    operation: Operation,
-    result: Option<String>,
+    input: String,
+    history: Vec<HistoryEntry>,
+    session: calculator_engine::SessionSnapshot,
+    #[serde(skip)]
+    runtime: CalculatorRuntime,
 }
 
 impl Default for CalculatorState {
     fn default() -> Self {
         Self {
-            left: String::new(),
-            right: String::new(),
-            operation: Operation::Add,
+            input: String::new(),
+            history: Vec::new(),
+            session: calculator_engine::SessionSnapshot {
+                schema_version: 1,
+                definitions: Vec::new(),
+            },
+            runtime: CalculatorRuntime::default(),
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(default)]
+struct CalculatorStateWire {
+    input: String,
+    history: Vec<HistoryEntry>,
+    session: calculator_engine::SessionSnapshot,
+    left: Option<String>,
+    right: Option<String>,
+    operation: Option<LegacyOperation>,
+    result: Option<String>,
+}
+
+impl Default for CalculatorStateWire {
+    fn default() -> Self {
+        Self {
+            input: String::new(),
+            history: Vec::new(),
+            session: default_session(),
+            left: None,
+            right: None,
+            operation: None,
             result: None,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Default, serde::Deserialize, serde::Serialize)]
-enum Operation {
-    #[default]
+fn default_session() -> calculator_engine::SessionSnapshot {
+    calculator_engine::SessionSnapshot {
+        schema_version: 1,
+        definitions: Vec::new(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+enum LegacyOperation {
     Add,
     Subtract,
     Multiply,
     Divide,
 }
 
-impl Operation {
-    /// Symbol shown in the operation selector.
-    fn symbol(self) -> &'static str {
+impl LegacyOperation {
+    fn symbol(&self) -> &'static str {
         match self {
             Self::Add => "+",
             Self::Subtract => "-",
-            Self::Multiply => "×",
-            Self::Divide => "÷",
-        }
-    }
-
-    fn apply(self, left: f64, right: f64) -> f64 {
-        match self {
-            Self::Add => left + right,
-            Self::Subtract => left - right,
-            Self::Multiply => left * right,
-            Self::Divide => left / right,
+            Self::Multiply => "*",
+            Self::Divide => "/",
         }
     }
 }
 
-/// Evaluate a calculator expression. Failure messages cover invalid operands,
-/// division by zero, and overflow/non-finite results.
-fn calculate(left: &str, operation: Operation, right: &str) -> Result<String, &'static str> {
-    let left: f64 = left
-        .trim()
-        .parse()
-        .map_err(|_err| "Enter valid numbers in both fields.")?;
-    let right: f64 = right
-        .trim()
-        .parse()
-        .map_err(|_err| "Enter valid numbers in both fields.")?;
-    let result = operation.apply(left, right);
-    if matches!(operation, Operation::Divide) && right == 0.0 {
-        return Err("Cannot divide by zero.");
+impl<'de> serde::Deserialize<'de> for CalculatorState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = CalculatorStateWire::deserialize(deserializer)?;
+        if !wire.input.is_empty()
+            || !wire.history.is_empty()
+            || wire.session.schema_version != 1
+            || !wire.session.definitions.is_empty()
+        {
+            return Ok(Self {
+                input: wire.input,
+                history: wire.history,
+                session: wire.session,
+                runtime: CalculatorRuntime::default(),
+            });
+        }
+        let mut state = Self::default();
+        if let (Some(left), Some(right)) = (wire.left, wire.right) {
+            let symbol = wire.operation.as_ref().map_or("+", LegacyOperation::symbol);
+            let input = format!("{left} {symbol} {right}");
+            if let Some(result) = wire.result {
+                state.history.push(HistoryEntry {
+                    input,
+                    outcome: HistoryOutcome::Value {
+                        primary: result,
+                        approximation: None,
+                    },
+                });
+            } else {
+                state.input = input;
+            }
+        }
+        Ok(state)
     }
-    if !result.is_finite() {
-        return Err("Result is not finite.");
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct HistoryEntry {
+    input: String,
+    outcome: HistoryOutcome,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+enum HistoryOutcome {
+    Value {
+        primary: String,
+        approximation: Option<String>,
+    },
+    Error {
+        message: String,
+    },
+}
+
+struct CalculatorRuntime {
+    calculator: calculator_engine::Calculator,
+    preview: Result<Option<calculator_engine::Evaluation>, calculator_engine::Diagnostic>,
+    completions: Vec<calculator_engine::Completion>,
+    completion_index: usize,
+    history_cursor: Option<usize>,
+    restore_warning: Option<String>,
+}
+
+impl Default for CalculatorRuntime {
+    fn default() -> Self {
+        Self {
+            calculator: calculator_engine::Calculator::new(),
+            preview: Ok(None),
+            completions: Vec::new(),
+            completion_index: 0,
+            history_cursor: None,
+            restore_warning: None,
+        }
     }
-    Ok(result.to_string())
+}
+
+impl CalculatorState {
+    fn restore_runtime(&mut self) {
+        let report = self.runtime.calculator.restore(&self.session);
+        if !report.discarded.is_empty() {
+            self.runtime.restore_warning = Some(
+                "Stored calculator variables were reset because their format is unsupported."
+                    .to_owned(),
+            );
+        }
+    }
+    fn refresh_preview(&mut self) {
+        self.runtime.preview = self.runtime.calculator.preview(&self.input);
+        self.runtime.completions = self
+            .runtime
+            .calculator
+            .complete(&self.input, self.input.len());
+        self.runtime.completion_index = self
+            .runtime
+            .completion_index
+            .min(self.runtime.completions.len().saturating_sub(1));
+    }
+    fn evaluate(&mut self) {
+        let input = self.input.trim().to_owned();
+        if input.is_empty() {
+            return;
+        }
+        let outcome = match self.runtime.calculator.evaluate(&input) {
+            Ok(value) => {
+                self.session = self.runtime.calculator.snapshot();
+                self.runtime.restore_warning = None;
+                HistoryOutcome::Value {
+                    primary: value.primary,
+                    approximation: value.approximation,
+                }
+            }
+            Err(error) => HistoryOutcome::Error {
+                message: error.message,
+            },
+        };
+        self.history.push(HistoryEntry { input, outcome });
+        if self.history.len() > 100 {
+            self.history.remove(0);
+        }
+        self.runtime.history_cursor = None;
+        self.input.clear();
+        self.refresh_preview();
+    }
 }
 
 /// Text analyzer input state. Persisted so the last session's text survives.
@@ -342,11 +468,14 @@ impl PortfolioApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Load previous app state (if any).
         // Note that you must enable the `persistence` feature for this to work.
-        if let Some(storage) = cc.storage {
+        let mut app = if let Some(storage) = cc.storage {
             eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
         } else {
-            Default::default()
-        }
+            Self::default()
+        };
+        app.calculator.restore_runtime();
+        app.calculator.refresh_preview();
+        app
     }
 
     /// True when the viewport is too narrow for simultaneous windows.
@@ -492,7 +621,7 @@ impl PortfolioApp {
             [220.0, 120.0],
             [360.0, 300.0],
             ui.ctx(),
-            |ui| show_calculator(ui, calculator, &mut workspace.calculator_error),
+            |ui| show_calculator(ui, calculator),
         );
 
         window(
@@ -578,11 +707,7 @@ impl PortfolioApp {
                         None
                     }
                     View::Calculator => {
-                        show_calculator(
-                            ui,
-                            &mut self.calculator,
-                            &mut self.workspace.calculator_error,
-                        );
+                        show_calculator(ui, &mut self.calculator);
                         None
                     }
                     View::TextAnalyzer => {
@@ -877,51 +1002,120 @@ fn is_valid_url(url: &str) -> bool {
     url.starts_with("https://") || url.starts_with("http://")
 }
 
-fn show_calculator(
-    ui: &mut egui::Ui,
-    state: &mut CalculatorState,
-    error: &mut Option<&'static str>,
-) {
-    ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut state.left).hint_text("left"));
-    });
-
-    egui::ComboBox::from_label("Operation")
-        .selected_text(state.operation.symbol())
-        .show_ui(ui, |ui| {
-            for operation in [
-                Operation::Add,
-                Operation::Subtract,
-                Operation::Multiply,
-                Operation::Divide,
-            ] {
-                ui.selectable_value(&mut state.operation, operation, operation.symbol());
+#[expect(
+    clippy::too_many_lines,
+    reason = "calculator view keeps history, input, preview, and completion controls together"
+)]
+fn show_calculator(ui: &mut egui::Ui, state: &mut CalculatorState) {
+    ui.heading("Scientific calculator");
+    ui.label("Examples: 1/3, sqrt(2), 5 m/s to km/h, x = 2");
+    egui::ScrollArea::vertical()
+        .max_height(180.0)
+        .show(ui, |ui| {
+            for entry in state.history.iter().rev() {
+                ui.monospace(&entry.input);
+                match &entry.outcome {
+                    HistoryOutcome::Value {
+                        primary,
+                        approximation,
+                    } => {
+                        ui.label(primary);
+                        if let Some(approximation) = approximation {
+                            ui.label(approximation);
+                        }
+                    }
+                    HistoryOutcome::Error { message } => {
+                        ui.colored_label(egui::Color32::RED, message);
+                    }
+                }
+                ui.separator();
             }
         });
-
-    ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut state.right).hint_text("right"));
-    });
-
-    if ui.button("Calculate").clicked() {
-        match calculate(&state.left, state.operation, &state.right) {
-            Ok(result) => {
-                state.result = Some(result);
-                *error = None;
+    let input_id = egui::Id::new("calculator_repl_input");
+    if let Some(warning) = &state.runtime.restore_warning {
+        ui.colored_label(egui::Color32::YELLOW, warning);
+    }
+    if ui.memory(|memory| memory.has_focus(input_id)) {
+        let up = ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
+        let down =
+            ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
+        let tab = ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+        if tab
+            && let Some(completion) = state.runtime.completions.first().cloned()
+            && state.input.get(completion.replacement.clone()).is_some()
+        {
+            state
+                .input
+                .replace_range(completion.replacement, &completion.insert);
+            state.refresh_preview();
+        }
+        if up && !state.history.is_empty() {
+            let next = state
+                .runtime
+                .history_cursor
+                .map_or(state.history.len() - 1, |index| index.saturating_sub(1));
+            state.runtime.history_cursor = Some(next);
+            state.input = state.history[next].input.clone();
+            state.refresh_preview();
+        }
+        if down && let Some(index) = state.runtime.history_cursor {
+            if index + 1 < state.history.len() {
+                state.runtime.history_cursor = Some(index + 1);
+                state.input = state.history[index + 1].input.clone();
+            } else {
+                state.runtime.history_cursor = None;
+                state.input.clear();
             }
-            Err(message) => {
-                state.result = None;
-                *error = Some(message);
-            }
+            state.refresh_preview();
         }
     }
-
-    if let Some(result) = &state.result {
-        ui.add_space(8.0);
-        ui.label(format!("Result: {result}"));
+    let response = ui.add(
+        egui::TextEdit::singleline(&mut state.input)
+            .id(input_id)
+            .hint_text("Enter an expression"),
+    );
+    if response.changed() {
+        state.runtime.history_cursor = None;
+        state.refresh_preview();
     }
-    if let Some(message) = *error {
-        ui.colored_label(egui::Color32::RED, message);
+    if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+        state.evaluate();
+        ui.memory_mut(|memory| memory.request_focus(input_id));
+    }
+    let completions: Vec<calculator_engine::Completion> =
+        state.runtime.completions.iter().take(8).cloned().collect();
+    if !completions.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            for completion in completions {
+                if ui.small_button(&completion.display).clicked()
+                    && state.input.get(completion.replacement.clone()).is_some()
+                {
+                    state
+                        .input
+                        .replace_range(completion.replacement, &completion.insert);
+                    state.refresh_preview();
+                    ui.memory_mut(|memory| memory.request_focus(input_id));
+                }
+            }
+        });
+    }
+    match &state.runtime.preview {
+        Ok(Some(value)) => {
+            ui.label(format!("Preview: {}", value.primary));
+            if let Some(approximation) = &value.approximation {
+                ui.label(approximation);
+            }
+        }
+        Err(error) => {
+            ui.colored_label(
+                egui::Color32::RED,
+                format!(
+                    "{} (bytes {}..{})",
+                    error.message, error.span.start, error.span.end
+                ),
+            );
+        }
+        Ok(None) => {}
     }
 }
 
@@ -931,9 +1125,7 @@ fn show_text_analyzer(ui: &mut egui::Ui, state: &mut TextAnalyzerState) {
             .desired_width(f32::INFINITY)
             .desired_rows(10),
     );
-
     let stats = analyze_text(&state.text);
-    ui.add_space(8.0);
     ui.label(format!(
         "Characters: {}\nWords: {}\nLines: {}",
         stats.characters, stats.words, stats.lines
@@ -962,12 +1154,10 @@ fn show_color_converter(
     if let Some(message) = *error {
         ui.colored_label(egui::Color32::RED, message);
     }
-
     let mut changed = false;
-    for (i, channel) in ["R", "G", "B"].iter().enumerate() {
-        let value = &mut state.rgb[i];
+    for (index, channel) in ["R", "G", "B"].iter().enumerate() {
         if ui
-            .add(egui::Slider::new(value, 0..=255).text(*channel))
+            .add(egui::Slider::new(&mut state.rgb[index], 0..=255).text(*channel))
             .changed()
         {
             changed = true;
@@ -977,9 +1167,7 @@ fn show_color_converter(
         state.hex_input = format_hex(state.rgb);
         *error = None;
     }
-
     let color = egui::Color32::from_rgb(state.rgb[0], state.rgb[1], state.rgb[2]);
-    ui.add_space(8.0);
     ui.label(format!(
         "RGB: {}, {}, {}\nHex: {}",
         state.rgb[0], state.rgb[1], state.rgb[2], state.hex_input
@@ -1014,45 +1202,40 @@ mod tests {
     }
 
     #[test]
-    fn calculate_adds() {
-        assert_eq!(
-            calculate("2", Operation::Add, "3").expect("2 + 3 must succeed"),
-            "5"
+    fn calculator_state_evaluates_and_previews_without_mutation() {
+        let mut calculator = CalculatorState {
+            input: "x = 2".to_owned(),
+            ..CalculatorState::default()
+        };
+        calculator.refresh_preview();
+        assert!(matches!(calculator.runtime.preview, Ok(Some(_))));
+        calculator.evaluate();
+        calculator.input = "x^2".to_owned();
+        calculator.evaluate();
+        assert!(
+            matches!(calculator.history.last().map(|entry| &entry.outcome), Some(HistoryOutcome::Value { primary, .. }) if primary == "4")
         );
     }
 
     #[test]
-    fn calculate_invalid_operand_fails() {
-        assert_eq!(
-            calculate("abc", Operation::Add, "3").expect_err("non-numeric operand must fail"),
-            "Enter valid numbers in both fields."
-        );
-        assert_eq!(
-            calculate("2", Operation::Add, "").expect_err("empty operand must fail"),
-            "Enter valid numbers in both fields."
-        );
-    }
-
-    #[test]
-    fn calculate_divide_by_zero_fails() {
-        assert_eq!(
-            calculate("1", Operation::Divide, "0")
-                .expect_err("division by positive zero must fail"),
-            "Cannot divide by zero."
-        );
-        assert_eq!(
-            calculate("1", Operation::Divide, "-0")
-                .expect_err("division by negative zero must fail"),
-            "Cannot divide by zero."
+    fn migrates_legacy_calculator_record() {
+        let state: CalculatorState = ron::de::from_str(
+            "(left:Some(\"2\"),right:Some(\"3\"),operation:Some(Add),result:Some(\"5\"))",
+        )
+        .expect("legacy record must deserialize");
+        assert_eq!(state.history.len(), 1);
+        assert_eq!(state.history[0].input, "2 + 3");
+        assert!(
+            matches!(&state.history[0].outcome, HistoryOutcome::Value { primary, .. } if primary == "5")
         );
     }
 
     #[test]
-    fn calculate_non_finite_result_fails() {
-        assert_eq!(
-            calculate("1e308", Operation::Multiply, "1e308").expect_err("overflow must fail"),
-            "Result is not finite."
-        );
+    fn migrates_incomplete_legacy_calculator_to_empty_repl() {
+        let state: CalculatorState = ron::de::from_str("(left:Some(\"2\"))")
+            .expect("incomplete legacy record must deserialize");
+        assert!(state.input.is_empty());
+        assert!(state.history.is_empty());
     }
 
     #[test]
@@ -1130,44 +1313,22 @@ mod tests {
     }
 
     #[test]
-    fn persistence_keeps_data_and_resets_workspace() {
+    fn persistence_keeps_calculator_session_and_resets_workspace() {
         let mut app = PortfolioApp::default();
-        app.portfolio.display_name = "Ada Lovelace".to_owned();
-        app.portfolio.projects.push(Project {
-            title: "Analytica".to_owned(),
-            summary: "The first algorithm engine".to_owned(),
-            url: "https://example.com".to_owned(),
-        });
-        app.calculator.left = "6".to_owned();
-        app.calculator.operation = Operation::Divide;
-        app.calculator.right = "3".to_owned();
-        app.calculator.result = Some("2".to_owned());
+        app.calculator.input = "x = 2".to_owned();
+        app.calculator.evaluate();
         app.text_analyzer.text = "ab".to_owned();
-        app.color_converter.hex_input = "#ff0080".to_owned();
-        app.color_converter.rgb = [255, 0, 128];
-        // Simulate a modified session's transient state:
         app.workspace.mobile_view = View::Calculator;
         app.workspace.calculator_open = true;
-        app.workspace.calculator_error = Some("Cannot divide by zero.");
-
         let mut storage = MemoryStorage(HashMap::new());
         eframe::set_value(&mut storage, eframe::APP_KEY, &app);
-
-        let restored: PortfolioApp =
-            eframe::get_value(&storage, eframe::APP_KEY).expect("state must round-trip");
-
-        assert_eq!(restored.portfolio.display_name, "Ada Lovelace");
-        assert_eq!(restored.portfolio.projects.len(), 1);
-        assert_eq!(restored.portfolio.projects[0].title, "Analytica");
-        assert_eq!(restored.calculator.result.as_deref(), Some("2"));
-        assert_eq!(restored.calculator.operation, Operation::Divide);
-        assert_eq!(restored.text_analyzer.text, "ab");
-        assert_eq!(restored.color_converter.rgb, [255, 0, 128]);
-
-        // Workspace resets even though the transient state was set before saving:
+        let raw = eframe::Storage::get_string(&storage, eframe::APP_KEY)
+            .expect("stored state must exist");
+        let mut restored: PortfolioApp = ron::de::from_str(&raw).expect("state must round-trip");
+        restored.calculator.restore_runtime();
+        assert_eq!(restored.calculator.session.definitions.len(), 1);
+        assert_eq!(restored.calculator.history.len(), 1);
         assert_eq!(restored.workspace.mobile_view, View::Home);
         assert!(!restored.workspace.calculator_open);
-        assert!(restored.workspace.calculator_error.is_none());
-        assert!(restored.workspace.color_error.is_none());
     }
 }
