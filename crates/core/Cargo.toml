@@ -1,0 +1,16 @@
+[package]
+name = "core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+calculator-engine = { path = "../calculator-engine", version = "0.1.0" }
+serde = { version = "1.0.219", features = ["derive"] }
+
+
+[dev-dependencies]
+ron = "0.11"
+[lints]
+workspace = true

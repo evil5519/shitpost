@@ -51,10 +51,22 @@ pub struct DefinitionSnapshot {
     pub name: String,
     pub source: String,
 }
+/// Current persisted engine session schema.
+pub const CURRENT_SESSION_VERSION: u16 = 1;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct SessionSnapshot {
     pub schema_version: u16,
     pub definitions: Vec<DefinitionSnapshot>,
+}
+
+impl Default for SessionSnapshot {
+    fn default() -> Self {
+        Self {
+            schema_version: CURRENT_SESSION_VERSION,
+            definitions: Vec::new(),
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoreReport {
@@ -102,7 +114,7 @@ impl Calculator {
     #[must_use]
     pub fn snapshot(&self) -> SessionSnapshot {
         SessionSnapshot {
-            schema_version: 1,
+            schema_version: CURRENT_SESSION_VERSION,
             definitions: self
                 .vars
                 .iter()
@@ -116,7 +128,7 @@ impl Calculator {
     #[must_use]
     pub fn restore(&mut self, s: &SessionSnapshot) -> RestoreReport {
         self.vars.clear();
-        if s.schema_version != 1 {
+        if s.schema_version != CURRENT_SESSION_VERSION {
             return RestoreReport {
                 restored: 0,
                 discarded: s

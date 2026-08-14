@@ -13,19 +13,12 @@ targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
 
 
 [workspace]
-members = ["crates/calculator-engine"]
+members = ["crates/calculator-engine", "crates/core", "crates/ui"]
 resolver = "3"
 [dependencies]
-egui = "0.36.0"
-eframe = { version = "0.36.0", features = ["persistence"] }
-log = "0.4.27"
 
-# You only need serde if you want app persistence:
-serde = { version = "1.0.219", features = ["derive"] }
-calculator-engine = { path = "crates/calculator-engine", version = "0.1.0" }
+ui = { path = "crates/ui", version = "0.1.0" }
 
-[dev-dependencies]
-ron = "0.11"
 
 [features]
 # Enables eframe's `inspection` plugin so the egui MCP (`egui-mcp`, from
@@ -35,16 +28,8 @@ ron = "0.11"
 # completely off; truthy (1/true) binds 127.0.0.1:5719; any other value is a
 # host:port bind address (e.g. 0.0.0.0:5719). Release builds omit it by
 # default.
-inspection = ["eframe/inspection"]
+inspection = ["ui/inspection"]
 
-# native:
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-env_logger = "0.11.8"
-
-# web:
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen-futures = "0.4.50"
-web-sys = "0.3.70"              # to access the DOM (to hide the loading text)
 
 [profile.release]
 opt-level = 2 # fast and small wasm
